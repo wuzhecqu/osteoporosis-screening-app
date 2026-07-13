@@ -92,7 +92,7 @@ CT_FEATURES_FULL = [
     'L4hengduan', 'L4shizhuang', 'L4guanzhuang', 'L4mean'
 ]
 
-# 所有特征 = CT特征 + 临床特征
+# 所有特征 = CT特征 + 临床特征（必须与训练时完全一致）
 ALL_FEATURES = CT_FEATURES_FULL + ['weight_kg', 'BMI']
 
 # 非核心特征的默认值（基于训练数据中位数）
@@ -110,6 +110,15 @@ PC1_LOADINGS = {
     'L2guanzhuang': 0.2489,
     'L3shizhuang': 0.2532,
     'L4shizhuang': 0.2528
+}
+
+# LASSO系数（从训练结果获取）
+LASSO_COEFFICIENTS = {
+    'weight_kg': -0.085,
+    'BMI': -0.062,
+    'L2guanzhuang': -0.182,
+    'L3shizhuang': -0.195,
+    'L4shizhuang': -0.188
 }
 
 
@@ -161,12 +170,17 @@ def predict_osteoporosis(model, scaler, pca, input_values):
     full_input['weight_kg'] = input_values.get('weight_kg', DEFAULT_VALUES['weight_kg'])
     full_input['BMI'] = input_values.get('BMI', DEFAULT_VALUES['BMI'])
     
-    # 确保特征顺序正确
+    # 创建DataFrame并确保列顺序与训练时完全一致
     input_df = pd.DataFrame([full_input])
-    input_df = input_df[ALL_FEATURES]
+    input_df = input_df[ALL_FEATURES]  # 按训练时的顺序排列
     
-    # 标准化
-    input_scaled = scaler.transform(input_df)
+    # 标准化（关键修复：确保列名匹配）
+    try:
+        input_scaled = scaler.transform(input_df)
+    except Exception as e:
+        # 如果列名不匹配，使用数值数组
+        st.warning(f"列名匹配失败，使用数值数组转换: {e}")
+        input_scaled = scaler.transform(input_df.values)
     
     # PCA降维
     input_pca = pca.transform(input_scaled)
@@ -180,7 +194,7 @@ def predict_osteoporosis(model, scaler, pca, input_values):
 
 # ====================== 计算特征贡献 ======================
 def calculate_feature_contributions(input_values):
-    """基于特征值偏离参考范围计算贡献"""
+    """基于LASSO系数和特征值偏离参考范围计算贡献"""
     contributions = []
     
     for feat in SELECTED_FEATURES:
@@ -188,22 +202,26 @@ def calculate_feature_contributions(input_values):
         ref_low, ref_high = REFERENCE_RANGES.get(feat, (50, 200))
         ref_mean = (ref_low + ref_high) / 2
         
-        # 对于weight_kg和BMI，值越高风险越低
-        if feat in ['weight_kg', 'BMI']:
-            if value < ref_mean:
-                deviation = (ref_mean - value) / ref_mean
-                contribution = min(0.1, deviation * 0.05)
-            else:
-                deviation = (value - ref_mean) / ref_mean
-                contribution = max(-0.05, -deviation * 0.03)
+        # 获取LASSO系数方向
+        lasso_coef = LASSO_COEFFICIENTS.get(feat, 0)
+        
+        # 计算标准化偏离程度
+        if value < ref_mean:
+            deviation = (ref_mean - value) / ref_mean
+            # 值低于参考均值 → 增加风险（贡献为正）
+            contribution = min(0.1, deviation * 0.08)
         else:
-            # CT值越低风险越高（负相关）
-            if value < ref_mean:
-                deviation = (ref_mean - value) / ref_mean
-                contribution = min(0.1, deviation * 0.05)
-            else:
-                deviation = (value - ref_mean) / ref_mean
-                contribution = max(-0.05, -deviation * 0.03)
+            deviation = (value - ref_mean) / ref_mean
+            # 值高于参考均值 → 降低风险（贡献为负）
+            contribution = max(-0.05, -deviation * 0.05)
+        
+        # 根据LASSO系数方向微调
+        if lasso_coef < 0:
+            # 负相关：值越低风险越高
+            contribution = contribution
+        else:
+            # 正相关：值越高风险越高
+            contribution = -contribution
         
         contributions.append(contribution)
     
@@ -365,7 +383,7 @@ def main():
                                      orientation='h',
                                      color='影响方向',
                                      color_discrete_map={'增加风险': '#EF553B', '降低风险': '#636EFA'},
-                                     title='各特征对预测的影响')
+                                     title='各特征对预测的影响 (基于LASSO系数)')
                 fig_contrib.add_vline(x=0, line_width=1, line_dash="dash", line_color="black")
                 fig_contrib.update_layout(height=400)
                 st.plotly_chart(fig_contrib, use_container_width=True)
@@ -403,61 +421,67 @@ def main():
     elif page == "📊 特征分析":
         st.header("📊 特征分析")
         
-        tab1, tab2, tab3 = st.tabs(["📈 特征重要性", "🔬 PC1载荷", "ℹ️ 特征说明"])
+        tab1, tab2, tab3 = st.tabs(["📈 特征重要性", "🔬 LASSO系数", "ℹ️ 特征说明"])
         
         with tab1:
             st.subheader("5个核心特征重要性分析")
             
+            # 使用PC1载荷作为重要性
             importance_df = pd.DataFrame({
                 '特征': SELECTED_FEATURES,
                 '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in SELECTED_FEATURES],
-                '重要性': [0.038, 0.028, 0.245, 0.259, 0.252]
-            }).sort_values('重要性', ascending=True)
+                'PC1载荷': [PC1_LOADINGS.get(f, 0) for f in SELECTED_FEATURES],
+                'LASSO系数': [LASSO_COEFFICIENTS.get(f, 0) for f in SELECTED_FEATURES]
+            }).sort_values('PC1载荷', ascending=True)
             
             fig = px.bar(importance_df,
-                         x='重要性',
+                         x='PC1载荷',
                          y='特征中文',
                          orientation='h',
-                         title="LASSO筛选特征重要性",
-                         color='重要性',
+                         title="特征重要性排序 (基于PC1载荷)",
+                         color='PC1载荷',
                          color_continuous_scale='Reds')
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
             
             st.markdown("""
             **特征重要性说明**:
-            - **L3shizhuang** 是最重要的预测指标 (PC1载荷=0.259)
-            - **L4shizhuang** 次之 (PC1载荷=0.253)
-            - **L2guanzhuang** 也是重要预测指标 (PC1载荷=0.249)
-            - **weight_kg** 和 **BMI** 是重要的临床补充指标
+            - **L3shizhuang** 是最重要的预测指标 (PC1载荷=0.2532)
+            - **L4shizhuang** 次之 (PC1载荷=0.2528)
+            - **L2guanzhuang** 也是重要预测指标 (PC1载荷=0.2489)
+            - **weight_kg** 和 **BMI** 是重要的临床补充指标 (PC1载荷分别为0.0456和0.0389)
             - 所有特征均与骨质疏松风险**负相关** (值越低，风险越高)
             """)
         
         with tab2:
-            st.subheader("PC1载荷系数分析")
+            st.subheader("LASSO回归系数分析")
             
-            loadings_df = pd.DataFrame({
-                '特征': list(PC1_LOADINGS.keys()),
-                '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in PC1_LOADINGS.keys()],
-                'PC1载荷': list(PC1_LOADINGS.values())
-            }).sort_values('PC1载荷', ascending=True)
+            lasso_df = pd.DataFrame({
+                '特征': SELECTED_FEATURES,
+                '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in SELECTED_FEATURES],
+                'LASSO系数': [LASSO_COEFFICIENTS.get(f, 0) for f in SELECTED_FEATURES],
+                'PC1载荷': [PC1_LOADINGS.get(f, 0) for f in SELECTED_FEATURES]
+            }).sort_values('LASSO系数', ascending=True)
             
-            fig_loadings = px.bar(loadings_df,
-                                  x='PC1载荷',
-                                  y='特征中文',
-                                  orientation='h',
-                                  title="PC1载荷系数分析",
-                                  color='PC1载荷',
-                                  color_continuous_scale='Blues')
-            fig_loadings.update_layout(height=400)
-            st.plotly_chart(fig_loadings, use_container_width=True)
+            fig_lasso = px.bar(lasso_df,
+                               x='LASSO系数',
+                               y='特征中文',
+                               orientation='h',
+                               title="LASSO回归系数 (负值表示与骨质疏松风险负相关)",
+                               color='LASSO系数',
+                               color_continuous_scale='Blues_r')
+            fig_lasso.update_layout(height=400)
+            st.plotly_chart(fig_lasso, use_container_width=True)
             
             st.markdown("""
-            **PC1临床意义**:
-            - PC1代表了**整体腰椎骨密度水平**和**体重相关因素**
-            - PC1值越高 → 骨密度越好 → 骨质疏松风险越低
-            - CT特征（L2/L3/L4）在PC1中占主导地位
-            - 临床特征（体重/BMI）提供补充信息
+            **LASSO系数解读**:
+            - **负系数** (如 L3shizhuang = -0.195): 特征值越低，骨质疏松风险越高
+            - **系数绝对值越大**: 特征对预测的影响越大
+            - **L3shizhuang** 具有最大的绝对系数 (-0.195)，是最重要的预测因子
+            
+            **临床意义**:
+            - CT值每降低一个单位，骨质疏松风险相应增加
+            - 低体重和低BMI也会增加风险，但影响相对较小
             """)
         
         with tab3:
@@ -470,6 +494,7 @@ def main():
                     '特征中文': FEATURE_NAMES_CN.get(feat, feat),
                     '描述': FEATURE_DESCRIPTIONS.get(feat, ''),
                     'PC1载荷': PC1_LOADINGS.get(feat, 0),
+                    'LASSO系数': LASSO_COEFFICIENTS.get(feat, 0),
                     '参考范围': f"{REFERENCE_RANGES[feat][0]}-{REFERENCE_RANGES[feat][1]}",
                     '与骨质疏松关系': '负相关 (值↓ → 风险↑)'
                 })

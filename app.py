@@ -84,32 +84,21 @@ DEFAULT_VALUES = {
     'L4shizhuang': 140.0
 }
 
-# 完整CT特征列表（16个）- 用于PCA
-CT_FEATURES_FULL = [
+# ====================== 重要：与训练时完全一致的特征列表 ======================
+# 训练时scaler只使用了16个CT特征（没有包含weight_kg和BMI）
+CT_FEATURES_ONLY = [
     'L1hengduan', 'L1shizhuang', 'L1guanzhuang', 'L1mean',
     'L2hengduan', 'L2shizhuang', 'L2guanzhuang', 'L2mean',
     'L3hengduan', 'L3shizhuang', 'L3guanzhuang', 'L3mean',
     'L4hengduan', 'L4shizhuang', 'L4guanzhuang', 'L4mean'
 ]
 
-# 所有特征 = CT特征 + 临床特征（必须与训练时完全一致）
-ALL_FEATURES = CT_FEATURES_FULL + ['weight_kg', 'BMI']
-
-# 非核心特征的默认值（基于训练数据中位数）
+# 非核心CT特征的默认值（基于训练数据中位数）
 DEFAULT_CT_VALUES = {
     'L1hengduan': 140, 'L1shizhuang': 138, 'L1guanzhuang': 135, 'L1mean': 138,
-    'L2hengduan': 142, 'L2guanzhuang': 140, 'L2mean': 145,
-    'L3hengduan': 145, 'L3shizhuang': 143, 'L3guanzhuang': 141, 'L3mean': 143,
-    'L4hengduan': 138, 'L4shizhuang': 136, 'L4guanzhuang': 135, 'L4mean': 140
-}
-
-# PC1载荷（从PCA结果获取）
-PC1_LOADINGS = {
-    'weight_kg': 0.0456,
-    'BMI': 0.0389,
-    'L2guanzhuang': 0.2489,
-    'L3shizhuang': 0.2532,
-    'L4shizhuang': 0.2528
+    'L2hengduan': 142, 'L2mean': 145,
+    'L3hengduan': 145, 'L3guanzhuang': 141, 'L3mean': 143,
+    'L4hengduan': 138, 'L4guanzhuang': 135, 'L4mean': 140
 }
 
 # LASSO系数（从训练结果获取）
@@ -119,6 +108,15 @@ LASSO_COEFFICIENTS = {
     'L2guanzhuang': -0.182,
     'L3shizhuang': -0.195,
     'L4shizhuang': -0.188
+}
+
+# PC1载荷
+PC1_LOADINGS = {
+    'weight_kg': 0.0456,
+    'BMI': 0.0389,
+    'L2guanzhuang': 0.2489,
+    'L3shizhuang': 0.2532,
+    'L4shizhuang': 0.2528
 }
 
 
@@ -148,7 +146,7 @@ def predict_osteoporosis(model, scaler, pca, input_values):
     
     Args:
         model: 决策树模型
-        scaler: 标准化器
+        scaler: 标准化器 (只包含16个CT特征)
         pca: PCA模型
         input_values: 5个核心特征的输入值字典
     
@@ -156,37 +154,31 @@ def predict_osteoporosis(model, scaler, pca, input_values):
         probability: 骨质疏松概率
         prediction: 预测类别 (0/1)
     """
-    # 构建完整的特征数组（16个CT特征 + 2个临床特征）
-    full_input = {}
+    # 构建16个CT特征的数组（与scaler训练时完全一致）
+    ct_input = {}
     
-    # 先填充所有CT特征
-    for feat in CT_FEATURES_FULL:
+    for feat in CT_FEATURES_ONLY:
         if feat in input_values:
-            full_input[feat] = input_values[feat]
+            # 用户输入的CT特征（L2guanzhuang, L3shizhuang, L4shizhuang）
+            ct_input[feat] = input_values[feat]
+        elif feat in DEFAULT_CT_VALUES:
+            # 使用默认值
+            ct_input[feat] = DEFAULT_CT_VALUES[feat]
         else:
-            full_input[feat] = DEFAULT_CT_VALUES.get(feat, 140)
+            ct_input[feat] = 140
     
-    # 添加临床特征
-    full_input['weight_kg'] = input_values.get('weight_kg', DEFAULT_VALUES['weight_kg'])
-    full_input['BMI'] = input_values.get('BMI', DEFAULT_VALUES['BMI'])
+    # 创建DataFrame，只包含16个CT特征
+    ct_df = pd.DataFrame([ct_input])
+    ct_df = ct_df[CT_FEATURES_ONLY]  # 确保顺序正确
     
-    # 创建DataFrame并确保列顺序与训练时完全一致
-    input_df = pd.DataFrame([full_input])
-    input_df = input_df[ALL_FEATURES]  # 按训练时的顺序排列
-    
-    # 标准化（关键修复：确保列名匹配）
-    try:
-        input_scaled = scaler.transform(input_df)
-    except Exception as e:
-        # 如果列名不匹配，使用数值数组
-        st.warning(f"列名匹配失败，使用数值数组转换: {e}")
-        input_scaled = scaler.transform(input_df.values)
+    # 标准化（使用scaler，只处理16个CT特征）
+    ct_scaled = scaler.transform(ct_df)
     
     # PCA降维
-    input_pca = pca.transform(input_scaled)
+    ct_pca = pca.transform(ct_scaled)
     
     # 预测
-    probability = model.predict_proba(input_pca)[0, 1]
+    probability = model.predict_proba(ct_pca)[0, 1]
     prediction = 1 if probability > 0.5 else 0
     
     return probability, prediction
@@ -194,16 +186,13 @@ def predict_osteoporosis(model, scaler, pca, input_values):
 
 # ====================== 计算特征贡献 ======================
 def calculate_feature_contributions(input_values):
-    """基于LASSO系数和特征值偏离参考范围计算贡献"""
+    """基于特征值偏离参考范围计算贡献"""
     contributions = []
     
     for feat in SELECTED_FEATURES:
         value = input_values[feat]
         ref_low, ref_high = REFERENCE_RANGES.get(feat, (50, 200))
         ref_mean = (ref_low + ref_high) / 2
-        
-        # 获取LASSO系数方向
-        lasso_coef = LASSO_COEFFICIENTS.get(feat, 0)
         
         # 计算标准化偏离程度
         if value < ref_mean:
@@ -214,14 +203,6 @@ def calculate_feature_contributions(input_values):
             deviation = (value - ref_mean) / ref_mean
             # 值高于参考均值 → 降低风险（贡献为负）
             contribution = max(-0.05, -deviation * 0.05)
-        
-        # 根据LASSO系数方向微调
-        if lasso_coef < 0:
-            # 负相关：值越低风险越高
-            contribution = contribution
-        else:
-            # 正相关：值越高风险越高
-            contribution = -contribution
         
         contributions.append(contribution)
     
@@ -307,115 +288,120 @@ def main():
         # 预测按钮
         if st.button("🚀 开始预测", type="primary", use_container_width=True):
             with st.spinner("正在分析中..."):
-                # 执行预测
-                probability, prediction = predict_osteoporosis(model, scaler, pca, input_values)
-                
-                # 显示结果
-                st.markdown("---")
-                st.subheader("📊 预测结果")
-                
-                col_res1, col_res2, col_res3 = st.columns(3)
-                
-                with col_res1:
-                    if prediction == 1:
-                        st.error(f"## ⚠️ 诊断结果: **骨质疏松**")
+                try:
+                    # 执行预测
+                    probability, prediction = predict_osteoporosis(model, scaler, pca, input_values)
+                    
+                    # 显示结果
+                    st.markdown("---")
+                    st.subheader("📊 预测结果")
+                    
+                    col_res1, col_res2, col_res3 = st.columns(3)
+                    
+                    with col_res1:
+                        if prediction == 1:
+                            st.error(f"## ⚠️ 诊断结果: **骨质疏松**")
+                        else:
+                            st.success(f"## ✅ 诊断结果: **非骨质疏松**")
+                    
+                    with col_res2:
+                        st.metric("骨质疏松概率", f"{probability:.2%}")
+                    
+                    with col_res3:
+                        if probability < 0.3:
+                            st.success("### 风险等级: 🟢 低风险")
+                        elif probability < 0.7:
+                            st.warning("### 风险等级: 🟡 中风险")
+                        else:
+                            st.error("### 风险等级: 🔴 高风险")
+                    
+                    # 风险仪表盘
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=probability * 100,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "骨质疏松风险 (%)"},
+                        gauge={
+                            'axis': {'range': [0, 100]},
+                            'bar': {'color': "darkred"},
+                            'steps': [
+                                {'range': [0, 30], 'color': "lightgreen"},
+                                {'range': [30, 70], 'color': "lightyellow"},
+                                {'range': [70, 100], 'color': "lightcoral"}
+                            ],
+                            'threshold': {'line': {'color': "black", 'width': 4}, 'thickness': 0.75, 'value': 50}
+                        }
+                    ))
+                    fig_gauge.update_layout(height=300)
+                    st.plotly_chart(fig_gauge, use_container_width=True)
+                    
+                    # 特征贡献分析
+                    st.subheader("🧠 模型决策解释")
+                    
+                    contributions = calculate_feature_contributions(input_values)
+                    
+                    contrib_df = pd.DataFrame({
+                        '特征': SELECTED_FEATURES,
+                        '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in SELECTED_FEATURES],
+                        '输入值': [input_values[f] for f in SELECTED_FEATURES],
+                        '贡献值': contributions,
+                        '影响方向': ['增加风险' if v > 0 else '降低风险' for v in contributions]
+                    })
+                    contrib_df['绝对值'] = np.abs(contrib_df['贡献值'])
+                    contrib_df = contrib_df.sort_values('绝对值', ascending=False)
+                    
+                    st.dataframe(
+                        contrib_df[['特征中文', '输入值', '贡献值', '影响方向']].style.format({
+                            '输入值': '{:.1f}',
+                            '贡献值': '{:.4f}'
+                        }),
+                        use_container_width=True
+                    )
+                    
+                    # 贡献条形图
+                    fig_contrib = px.bar(contrib_df,
+                                         x='贡献值',
+                                         y='特征中文',
+                                         orientation='h',
+                                         color='影响方向',
+                                         color_discrete_map={'增加风险': '#EF553B', '降低风险': '#636EFA'},
+                                         title='各特征对预测的影响')
+                    fig_contrib.add_vline(x=0, line_width=1, line_dash="dash", line_color="black")
+                    fig_contrib.update_layout(height=400)
+                    st.plotly_chart(fig_contrib, use_container_width=True)
+                    
+                    # 临床建议
+                    st.subheader("📋 临床建议")
+                    if probability > 0.7:
+                        st.warning("""
+                        **⚠️ 高风险 (骨质疏松概率 > 70%)**:
+                        1. **建议就诊**: 尽快咨询内分泌科或骨科专家
+                        2. **DXA检查**: 建议进行双能X线骨密度检查确诊
+                        3. **药物治疗**: 根据医生建议考虑抗骨质疏松药物
+                        4. **生活方式**: 增加钙和维生素D摄入，适度负重运动
+                        5. **预防跌倒**: 评估跌倒风险，采取预防措施
+                        """)
+                    elif probability > 0.3:
+                        st.info("""
+                        **⚠️ 中风险 (骨质疏松概率 30%-70%)**:
+                        1. **骨密度监测**: 建议1年内复查DXA
+                        2. **生活方式调整**: 增加钙摄入(1000-1200mg/天)
+                        3. **补充维生素D**: 维持血清25(OH)D > 30 ng/mL
+                        4. **负重运动**: 每周3-5次，每次30分钟
+                        5. **戒烟限酒**: 减少骨质流失风险因素
+                        """)
                     else:
-                        st.success(f"## ✅ 诊断结果: **非骨质疏松**")
+                        st.success("""
+                        **✅ 低风险 (骨质疏松概率 < 30%)**:
+                        1. **常规随访**: 每2-3年复查骨密度
+                        2. **维持健康生活方式**: 均衡饮食，适度运动
+                        3. **充足钙摄入**: 每日800-1000mg钙剂
+                        4. **预防为主**: 保持良好生活习惯
+                        """)
                 
-                with col_res2:
-                    st.metric("骨质疏松概率", f"{probability:.2%}")
-                
-                with col_res3:
-                    if probability < 0.3:
-                        st.success("### 风险等级: 🟢 低风险")
-                    elif probability < 0.7:
-                        st.warning("### 风险等级: 🟡 中风险")
-                    else:
-                        st.error("### 风险等级: 🔴 高风险")
-                
-                # 风险仪表盘
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=probability * 100,
-                    domain={'x': [0, 1], 'y': [0, 1]},
-                    title={'text': "骨质疏松风险 (%)"},
-                    gauge={
-                        'axis': {'range': [0, 100]},
-                        'bar': {'color': "darkred"},
-                        'steps': [
-                            {'range': [0, 30], 'color': "lightgreen"},
-                            {'range': [30, 70], 'color': "lightyellow"},
-                            {'range': [70, 100], 'color': "lightcoral"}
-                        ],
-                        'threshold': {'line': {'color': "black", 'width': 4}, 'thickness': 0.75, 'value': 50}
-                    }
-                ))
-                fig_gauge.update_layout(height=300)
-                st.plotly_chart(fig_gauge, use_container_width=True)
-                
-                # 特征贡献分析
-                st.subheader("🧠 模型决策解释")
-                
-                contributions = calculate_feature_contributions(input_values)
-                
-                contrib_df = pd.DataFrame({
-                    '特征': SELECTED_FEATURES,
-                    '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in SELECTED_FEATURES],
-                    '输入值': [input_values[f] for f in SELECTED_FEATURES],
-                    '贡献值': contributions,
-                    '影响方向': ['增加风险' if v > 0 else '降低风险' for v in contributions]
-                })
-                contrib_df['绝对值'] = np.abs(contrib_df['贡献值'])
-                contrib_df = contrib_df.sort_values('绝对值', ascending=False)
-                
-                st.dataframe(
-                    contrib_df[['特征中文', '输入值', '贡献值', '影响方向']].style.format({
-                        '输入值': '{:.1f}',
-                        '贡献值': '{:.4f}'
-                    }),
-                    use_container_width=True
-                )
-                
-                # 贡献条形图
-                fig_contrib = px.bar(contrib_df,
-                                     x='贡献值',
-                                     y='特征中文',
-                                     orientation='h',
-                                     color='影响方向',
-                                     color_discrete_map={'增加风险': '#EF553B', '降低风险': '#636EFA'},
-                                     title='各特征对预测的影响 (基于LASSO系数)')
-                fig_contrib.add_vline(x=0, line_width=1, line_dash="dash", line_color="black")
-                fig_contrib.update_layout(height=400)
-                st.plotly_chart(fig_contrib, use_container_width=True)
-                
-                # 临床建议
-                st.subheader("📋 临床建议")
-                if probability > 0.7:
-                    st.warning("""
-                    **⚠️ 高风险 (骨质疏松概率 > 70%)**:
-                    1. **建议就诊**: 尽快咨询内分泌科或骨科专家
-                    2. **DXA检查**: 建议进行双能X线骨密度检查确诊
-                    3. **药物治疗**: 根据医生建议考虑抗骨质疏松药物
-                    4. **生活方式**: 增加钙和维生素D摄入，适度负重运动
-                    5. **预防跌倒**: 评估跌倒风险，采取预防措施
-                    """)
-                elif probability > 0.3:
-                    st.info("""
-                    **⚠️ 中风险 (骨质疏松概率 30%-70%)**:
-                    1. **骨密度监测**: 建议1年内复查DXA
-                    2. **生活方式调整**: 增加钙摄入(1000-1200mg/天)
-                    3. **补充维生素D**: 维持血清25(OH)D > 30 ng/mL
-                    4. **负重运动**: 每周3-5次，每次30分钟
-                    5. **戒烟限酒**: 减少骨质流失风险因素
-                    """)
-                else:
-                    st.success("""
-                    **✅ 低风险 (骨质疏松概率 < 30%)**:
-                    1. **常规随访**: 每2-3年复查骨密度
-                    2. **维持健康生活方式**: 均衡饮食，适度运动
-                    3. **充足钙摄入**: 每日800-1000mg钙剂
-                    4. **预防为主**: 保持良好生活习惯
-                    """)
+                except Exception as e:
+                    st.error(f"❌ 预测失败: {e}")
+                    st.info("请检查输入值是否在合理范围内，并确保模型文件正确。")
     
     # ====================== 特征分析页面 ======================
     elif page == "📊 特征分析":
@@ -426,12 +412,10 @@ def main():
         with tab1:
             st.subheader("5个核心特征重要性分析")
             
-            # 使用PC1载荷作为重要性
             importance_df = pd.DataFrame({
                 '特征': SELECTED_FEATURES,
                 '特征中文': [FEATURE_NAMES_CN.get(f, f) for f in SELECTED_FEATURES],
-                'PC1载荷': [PC1_LOADINGS.get(f, 0) for f in SELECTED_FEATURES],
-                'LASSO系数': [LASSO_COEFFICIENTS.get(f, 0) for f in SELECTED_FEATURES]
+                'PC1载荷': [PC1_LOADINGS.get(f, 0) for f in SELECTED_FEATURES]
             }).sort_values('PC1载荷', ascending=True)
             
             fig = px.bar(importance_df,
@@ -449,7 +433,7 @@ def main():
             - **L3shizhuang** 是最重要的预测指标 (PC1载荷=0.2532)
             - **L4shizhuang** 次之 (PC1载荷=0.2528)
             - **L2guanzhuang** 也是重要预测指标 (PC1载荷=0.2489)
-            - **weight_kg** 和 **BMI** 是重要的临床补充指标 (PC1载荷分别为0.0456和0.0389)
+            - **weight_kg** 和 **BMI** 是重要的临床补充指标
             - 所有特征均与骨质疏松风险**负相关** (值越低，风险越高)
             """)
         
@@ -467,7 +451,7 @@ def main():
                                x='LASSO系数',
                                y='特征中文',
                                orientation='h',
-                               title="LASSO回归系数 (负值表示与骨质疏松风险负相关)",
+                               title="LASSO回归系数",
                                color='LASSO系数',
                                color_continuous_scale='Blues_r')
             fig_lasso.update_layout(height=400)
@@ -475,13 +459,9 @@ def main():
             
             st.markdown("""
             **LASSO系数解读**:
-            - **负系数** (如 L3shizhuang = -0.195): 特征值越低，骨质疏松风险越高
+            - **负系数**: 特征值越低，骨质疏松风险越高
             - **系数绝对值越大**: 特征对预测的影响越大
             - **L3shizhuang** 具有最大的绝对系数 (-0.195)，是最重要的预测因子
-            
-            **临床意义**:
-            - CT值每降低一个单位，骨质疏松风险相应增加
-            - 低体重和低BMI也会增加风险，但影响相对较小
             """)
         
         with tab3:
@@ -515,11 +495,6 @@ def main():
             | **L2guanzhuang** | CT | -0.182 | 第2腰椎冠状面反映上腰椎骨密度 |
             | **L3shizhuang** | CT | -0.195 | 第3腰椎矢状面是腰椎中部代表 |
             | **L4shizhuang** | CT | -0.188 | 第4腰椎矢状面是承重最大区域 |
-            
-            **LASSO优势**:
-            - 自动特征筛选，避免过拟合
-            - 消除冗余特征，提高模型可解释性
-            - 同时保留临床和影像学特征，信息更全面
             """)
     
     # ====================== 使用说明页面 ======================
